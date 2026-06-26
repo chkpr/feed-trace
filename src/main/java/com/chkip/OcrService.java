@@ -9,17 +9,16 @@ import java.io.File;
 @Service
 public class OcrService {
 
-    private final Tesseract tesseract;
-
-    public OcrService() {
-        tesseract = new Tesseract();
-        tesseract.setDatapath("/usr/share/tesseract/tessdata");
-        tesseract.setLanguage("fra+eng");
-    }
+    private final ThreadLocal<Tesseract> tesseractThreadLocal = ThreadLocal.withInitial(() -> {
+        Tesseract t = new Tesseract();
+        t.setDatapath("/usr/share/tesseract/tessdata");
+        t.setLanguage("fra+eng");
+        return t;
+    });
 
     public String extractText(File image) {
         try {
-        	String text = tesseract.doOCR(image);
+            String text = tesseractThreadLocal.get().doOCR(image);
             System.out.println("OCR result: " + text);
             return text;
         } catch (TesseractException e) {

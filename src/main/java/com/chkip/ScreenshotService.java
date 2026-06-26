@@ -17,25 +17,32 @@ import java.util.List;
 public class ScreenshotService {
 
     private final ChatClient chatClient;
+    private final OcrService ocrService;
 
-    public ScreenshotService(ChatClient.Builder builder) {
+    public ScreenshotService(ChatClient.Builder builder, OcrService ocrService) {
         this.chatClient = builder.build();
+        this.ocrService = ocrService;
     }
 
     public void analyzeScreenshots(String folderPath) throws IOException {
         List<Path> images = Files.list(Paths.get(folderPath))
                 .filter(p -> p.toString().matches(".*\\.(png|jpg|jpeg)$"))
                 .toList();
-        
+
         int total = images.size();
         int count = 0;
 
         for (Path image : images) {
-        	count++;
-            System.out.println("Analyzing: " + count + "/" + total + ": " + image.getFileName());
+            count++;
+            System.out.println("Analyzing " + count + "/" + total + ": " + image.getFileName());
+
+            String ocrText = ocrService.extractText(image.toFile());
+            String prompt = "Look at this screenshot. " +
+                (ocrText.isBlank() ? "" : "The text visible in the image is: \"" + ocrText.strip() + "\". ") +
+                "What topics, interests or themes does it suggest about the person who saved it? Be concise.";
 
             var userMessage = UserMessage.builder()
-                    .text("Look at this screenshot. What topics, interests or themes does it suggest about the person who saved it? Be concise.")
+                    .text(prompt)
                     .media(new Media(MimeTypeUtils.IMAGE_PNG, new FileSystemResource(image)))
                     .build();
 

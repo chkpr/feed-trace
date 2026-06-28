@@ -7,6 +7,7 @@ import org.springframework.core.io.FileSystemResource;
 import org.springframework.stereotype.Service;
 import org.springframework.util.MimeTypeUtils;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -27,11 +28,13 @@ public class ScreenshotService {
     private final ChatClient chatClient;
     private final OcrService ocrService;
     private final TextDetectionService textDetectionService;
+    private final ImageResizeService imageResizeService;
 
-    public ScreenshotService(ChatClient.Builder builder, OcrService ocrService, TextDetectionService textDetectionService) {
+    public ScreenshotService(ChatClient.Builder builder, OcrService ocrService, TextDetectionService textDetectionService, ImageResizeService imageResizeService) {
         this.chatClient = builder.build();
         this.ocrService = ocrService;
         this.textDetectionService = textDetectionService;
+        this.imageResizeService = imageResizeService;
     }
 
     public void analyzeScreenshots(String folderPath) throws IOException, InterruptedException, ExecutionException {
@@ -103,9 +106,10 @@ public class ScreenshotService {
                     System.out.println("🖼 " + current + "/" + total + ": " + image.getFileName());
                     long start = System.currentTimeMillis();
 
+                    File resizedImage = imageResizeService.resize(image);
                     var userMessage = UserMessage.builder()
                             .text("Look at this screenshot. What topics, interests or themes does it suggest about the person who saved it? Be concise.")
-                            .media(new Media(MimeTypeUtils.IMAGE_PNG, new FileSystemResource(image)))
+                            .media(new Media(MimeTypeUtils.IMAGE_PNG, new FileSystemResource(resizedImage)))
                             .build();
 
                     String response = chatClient.prompt()

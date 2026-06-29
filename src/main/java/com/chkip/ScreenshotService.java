@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.stereotype.Service;
 import org.springframework.util.MimeTypeUtils;
+import org.springframework.core.io.ByteArrayResource;
 
 import java.io.File;
 import java.io.IOException;
@@ -14,9 +15,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
 import java.util.ArrayList;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -50,69 +53,87 @@ public class ScreenshotService {
         System.out.println("=== Starting analysis of " + total + " images ===");
         
         
-        //Detection rapide pour tri des images
+        //Phase 1 OCR complet sur toutes les images
+        int ocrThreads = Runtime.getRuntime().availableProcessors() - 2;
+        ExecutorService ocrExecutor = Executors.newFixedThreadPool(ocrThreads);
+        Map<Path, String> ocrResults = new ConcurrentHashMap<>();
+        List<Future<?>> ocrFutures = new ArrayList<>();
+        
+        for (Path image : images) {
+        	ocrFutures.add(ocrExecutor.submit(() -> {
+        		String text = ocrService.extractText(image.toFile());
+        		ocrResults.put(image,  text);
+        	}));
+        }
+        for (Future<?> f : ocrFutures) f.get();
+        ocrExecutor.shutdown();
+        
+        long ocrDuration = System.currentTimeMillis() - startTotal;
+        System.out.println("=== OCR done in " + ocrDuration +" ms ===");
+        
+         //Phase 2 : tri fiable basé sur OCR complet
+         
         List<Path> textImages = new ArrayList<>();
         List<Path> visualImages = new ArrayList<>();
         
         for (Path image : images) {
-        	if(textDetectionService.hasSignificantText(image.toFile())) {
+        	String text = ocrResults.getOrDefault(image, "");
+        	long wordCount = text.strip().lines()
+        			.filter(line-> line.trim().length() > 3)
+        			.count();
+        	if (wordCount > 5) {
         		textImages.add(image);
         	} else {
         		visualImages.add(image);
         	}
         }
         
+        
         System.out.println("=== Text: " + textImages.size() + " | Visual: " + visualImages.size() + " ===");
         
-        // exécuter OCR + llama3 en parallèle avec llava 
-        int ocrThreads = Runtime.getRuntime().availableProcessors() - 2;
-        ExecutorService ocrExecutor = Executors.newFixedThreadPool(ocrThreads);
-        ExecutorService visualExecutor = Executors.newFixedThreadPool(2);
-        
+        // Phase 3 — analyse en parallèle
         AtomicInteger count = new AtomicInteger(0);
-        List<Future<?>> allFutures = new java.util.ArrayList<>();
+        ExecutorService ocrAnalysisExecutor = Executors.newFixedThreadPool(2);
+        ExecutorService visualExecutor = Executors.newFixedThreadPool(1);
+        List<Future<?>> allFutures = new ArrayList<>();
         
-        // analyse du texte : OCR + llama3     
+        // Texte → Gemini
         for (Path image : textImages) {
-            allFutures.add(ocrExecutor.submit(() -> {
+            allFutures.add(ocrAnalysisExecutor.submit(() -> {
                 try {
-                	
-                	long startImage = System.currentTimeMillis();
-                	
                     int current = count.incrementAndGet();
-                    System.out.println("Analyzing " + current + "/" + total + ": " + image.getFileName());
                     long start = System.currentTimeMillis();
-                    
-                    
-                    String ocrText = ocrService.extractText(image.toFile());
-                    String response = ollamaChatClient.prompt()
-                    		.user("based on this text extracted from an Instagram screenshot, what topic or insterest does it sugests? Be concise.\n\n" +ocrText)
-                    		.call()
-                    		.content();
+                    System.out.println("📝 " + current + "/" + total + ": " + image.getFileName());
 
-       
+                    String ocrText = ocrResults.get(image);
+                    String response = geminiChatClient.prompt()
+                            .user("Based on this text extracted from an Instagram screenshot, what topics or interests does it suggest? Be concise.\n\n" + ocrText)
+                            .call()
+                            .content();
                     
+                    Thread.sleep(4000);
+
                     long duration = System.currentTimeMillis() - start;
-                    System.out.println("-> " + response);
-                    System.out.println("Duration: " + duration + "ms ---");
+                    System.out.println("→ " + response);
+                    System.out.println("⏱ " + duration + "ms ---");
                 } catch (Exception e) {
-                    System.err.println("Error processing " + image.getFileName() + ": " + e.getMessage());
+                    System.err.println("Error: " + image.getFileName() + ": " + e.getClass().getName() + " - " + e.getMessage());
                 }
             }));
         }
-             
-        // Pool visuel → llava
+
+        // Visuel → Gemini
         for (Path image : visualImages) {
             allFutures.add(visualExecutor.submit(() -> {
                 try {
                     int current = count.incrementAndGet();
-                    System.out.println("🖼 " + current + "/" + total + ": " + image.getFileName());
                     long start = System.currentTimeMillis();
+                    System.out.println("🖼 " + current + "/" + total + ": " + image.getFileName());
 
-                    File resizedImage = imageResizeService.resize(image);
+                    byte[] imageBytes = Files.readAllBytes(image);
                     var userMessage = UserMessage.builder()
                             .text("Look at this screenshot. What topics, interests or themes does it suggest about the person who saved it? Be concise.")
-                            .media(new Media(MimeTypeUtils.IMAGE_PNG, new FileSystemResource(resizedImage)))
+                            .media(new Media(MimeTypeUtils.IMAGE_PNG, new ByteArrayResource(imageBytes)))
                             .build();
 
                     String response = geminiChatClient.prompt()
@@ -130,7 +151,7 @@ public class ScreenshotService {
         }
 
         for (Future<?> f : allFutures) f.get();
-        ocrExecutor.shutdown();
+        ocrAnalysisExecutor.shutdown();
         visualExecutor.shutdown();
 
         long totalDuration = System.currentTimeMillis() - startTotal;

@@ -3,6 +3,7 @@ package com.chkip;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.content.Media;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.stereotype.Service;
 import org.springframework.util.MimeTypeUtils;
@@ -25,13 +26,15 @@ import java.util.concurrent.Future;
 @Service
 public class ScreenshotService {
 
-    private final ChatClient chatClient;
+	private final ChatClient ollamaChatClient;
+    private final ChatClient geminiChatClient;
     private final OcrService ocrService;
     private final TextDetectionService textDetectionService;
     private final ImageResizeService imageResizeService;
 
-    public ScreenshotService(ChatClient.Builder builder, OcrService ocrService, TextDetectionService textDetectionService, ImageResizeService imageResizeService) {
-        this.chatClient = builder.build();
+    public ScreenshotService(@Qualifier("ollamaClient") ChatClient.Builder ollamaBuilder, @Qualifier("geminiClient") ChatClient.Builder geminiBuilder, OcrService ocrService, TextDetectionService textDetectionService, ImageResizeService imageResizeService) {
+        this.ollamaChatClient = ollamaBuilder.build();
+        this.geminiChatClient = geminiBuilder.build();
         this.ocrService = ocrService;
         this.textDetectionService = textDetectionService;
         this.imageResizeService = imageResizeService;
@@ -82,7 +85,7 @@ public class ScreenshotService {
                     
                     
                     String ocrText = ocrService.extractText(image.toFile());
-                    String response = chatClient.prompt()
+                    String response = ollamaChatClient.prompt()
                     		.user("based on this text extracted from an Instagram screenshot, what topic or insterest does it sugests? Be concise.\n\n" +ocrText)
                     		.call()
                     		.content();
@@ -112,7 +115,7 @@ public class ScreenshotService {
                             .media(new Media(MimeTypeUtils.IMAGE_PNG, new FileSystemResource(resizedImage)))
                             .build();
 
-                    String response = chatClient.prompt()
+                    String response = geminiChatClient.prompt()
                             .messages(userMessage)
                             .call()
                             .content();

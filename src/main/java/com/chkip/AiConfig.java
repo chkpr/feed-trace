@@ -15,12 +15,7 @@ public class AiConfig {
 		return ChatClient.builder(ollamaModel);
 		}
 	
-	@Bean
-	@Qualifier("geminiClient")
-	public ChatClient.Builder geminiClientBuilder(
-			org.springframework.ai.google.genai.GoogleGenAiChatModel geminiModel) {
-		return ChatClient.builder(geminiModel);
-	}
+
 			
 
 }

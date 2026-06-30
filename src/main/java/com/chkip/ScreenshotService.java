@@ -17,6 +17,7 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.ArrayList;
+import java.util.Collections;
 
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,20 +31,23 @@ import java.util.concurrent.Future;
 public class ScreenshotService {
 
 	private final ChatClient ollamaChatClient;
-    private final ChatClient geminiChatClient;
     private final OcrService ocrService;
     private final TextDetectionService textDetectionService;
     private final ImageResizeService imageResizeService;
 
-    public ScreenshotService(@Qualifier("ollamaClient") ChatClient.Builder ollamaBuilder, @Qualifier("geminiClient") ChatClient.Builder geminiBuilder, OcrService ocrService, TextDetectionService textDetectionService, ImageResizeService imageResizeService) {
+    public ScreenshotService(@Qualifier("ollamaClient") ChatClient.Builder ollamaBuilder, OcrService ocrService, TextDetectionService textDetectionService, ImageResizeService imageResizeService) {
         this.ollamaChatClient = ollamaBuilder.build();
-        this.geminiChatClient = geminiBuilder.build();
         this.ocrService = ocrService;
         this.textDetectionService = textDetectionService;
         this.imageResizeService = imageResizeService;
     }
+    
+    
 
     public void analyzeScreenshots(String folderPath) throws IOException, InterruptedException, ExecutionException {
+    	
+    	List<String> allResults = Collections.synchronizedList(new ArrayList<>());
+    	
         List<Path> images = Files.list(Paths.get(folderPath))
                 .filter(p -> p.toString().matches(".*\\.(png|jpg|jpeg)$"))
                 .toList();
@@ -55,18 +59,18 @@ public class ScreenshotService {
         
         //Phase 1 OCR complet sur toutes les images
         int ocrThreads = Runtime.getRuntime().availableProcessors() - 2;
-        ExecutorService ocrExecutor = Executors.newFixedThreadPool(ocrThreads);
+        ExecutorService ocrFullExecutor = Executors.newFixedThreadPool(ocrThreads);
         Map<Path, String> ocrResults = new ConcurrentHashMap<>();
-        List<Future<?>> ocrFutures = new ArrayList<>();
+        List<Future<?>> ocrFullFutures = new ArrayList<>();
         
         for (Path image : images) {
-        	ocrFutures.add(ocrExecutor.submit(() -> {
+        	ocrFullFutures.add(ocrFullExecutor.submit(() -> {
         		String text = ocrService.extractText(image.toFile());
         		ocrResults.put(image,  text);
         	}));
         }
-        for (Future<?> f : ocrFutures) f.get();
-        ocrExecutor.shutdown();
+        for (Future<?> f : ocrFullFutures) f.get();
+        ocrFullExecutor.shutdown();
         
         long ocrDuration = System.currentTimeMillis() - startTotal;
         System.out.println("=== OCR done in " + ocrDuration +" ms ===");
@@ -92,12 +96,13 @@ public class ScreenshotService {
         System.out.println("=== Text: " + textImages.size() + " | Visual: " + visualImages.size() + " ===");
         
         // Phase 3 — analyse en parallèle
+        
+        ExecutorService ocrAnalysisExecutor = Executors.newFixedThreadPool(6);
+        ExecutorService visualExecutor = Executors.newFixedThreadPool(2);
         AtomicInteger count = new AtomicInteger(0);
-        ExecutorService ocrAnalysisExecutor = Executors.newFixedThreadPool(2);
-        ExecutorService visualExecutor = Executors.newFixedThreadPool(1);
         List<Future<?>> allFutures = new ArrayList<>();
         
-        // Texte → Gemini
+        // Texte → llama3 via Ollama
         for (Path image : textImages) {
             allFutures.add(ocrAnalysisExecutor.submit(() -> {
                 try {
@@ -106,23 +111,24 @@ public class ScreenshotService {
                     System.out.println("📝 " + current + "/" + total + ": " + image.getFileName());
 
                     String ocrText = ocrResults.get(image);
-                    String response = geminiChatClient.prompt()
+                    String response = ollamaChatClient.prompt()
                             .user("Based on this text extracted from an Instagram screenshot, what topics or interests does it suggest? Be concise.\n\n" + ocrText)
                             .call()
                             .content();
                     
-                    Thread.sleep(4000);
-
+                    allResults.add(response);
+                    
                     long duration = System.currentTimeMillis() - start;
                     System.out.println("→ " + response);
                     System.out.println("⏱ " + duration + "ms ---");
                 } catch (Exception e) {
                     System.err.println("Error: " + image.getFileName() + ": " + e.getClass().getName() + " - " + e.getMessage());
+                    e.printStackTrace();
                 }
             }));
         }
 
-        // Visuel → Gemini
+        // Visuel → llava (resize 512px)
         for (Path image : visualImages) {
             allFutures.add(visualExecutor.submit(() -> {
                 try {
@@ -130,22 +136,24 @@ public class ScreenshotService {
                     long start = System.currentTimeMillis();
                     System.out.println("🖼 " + current + "/" + total + ": " + image.getFileName());
 
-                    byte[] imageBytes = Files.readAllBytes(image);
-                    var userMessage = UserMessage.builder()
-                            .text("Look at this screenshot. What topics, interests or themes does it suggest about the person who saved it? Be concise.")
-                            .media(new Media(MimeTypeUtils.IMAGE_PNG, new ByteArrayResource(imageBytes)))
-                            .build();
-
-                    String response = geminiChatClient.prompt()
+                   File resizedImage = imageResizeService.resize(image);
+                   var userMessage = UserMessage.builder()
+                		   .text("Look at this screenshot. What topics, interests or themes does it suggests about the person who saved it ? Be concise.")
+                   			.media(new Media(MimeTypeUtils.IMAGE_PNG, new FileSystemResource(resizedImage)))
+                   			.build();
+                    String response = ollamaChatClient.prompt()
                             .messages(userMessage)
                             .call()
                             .content();
+                    
+                    allResults.add(response);
 
                     long duration = System.currentTimeMillis() - start;
                     System.out.println("→ " + response);
                     System.out.println("⏱ " + duration + "ms ---");
                 } catch (Exception e) {
                     System.err.println("Error: " + image.getFileName() + ": " + e.getMessage());
+                    e.printStackTrace();
                 }
             }));
         }
@@ -153,6 +161,19 @@ public class ScreenshotService {
         for (Future<?> f : allFutures) f.get();
         ocrAnalysisExecutor.shutdown();
         visualExecutor.shutdown();
+        
+        System.out.println("=== Generating summary ===");
+        String combinedResults = String.join("\n---\n", allResults);
+        String summary = ollamaChatClient.prompt()
+                .user("Here are individual analyses of someone's saved Instagram screenshots. "
+                    + "Synthesize the recurring themes, interests, and patterns across all of them "
+                    + "into a clear, organized summary (3-5 main themes with brief explanations):\n\n"
+                    + combinedResults)
+                .call()
+                .content();
+
+        System.out.println("\n=== SUMMARY ===");
+        System.out.println(summary);
 
         long totalDuration = System.currentTimeMillis() - startTotal;
         System.out.println("=== Total: " + totalDuration + "ms pour " + total + " images ===");
